@@ -3,5 +3,3 @@ uvicorn
 onnxruntime
 transformers
 numpy
-optimum[exporters]
-accelerate
