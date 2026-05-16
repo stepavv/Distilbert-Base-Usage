@@ -18,7 +18,6 @@ def load_model():
     print(f"Загрузка модели {model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     session = ort.InferenceSession(model_path)
-    # ... (получение id2label из модели)
     print("Модель загружена.")
 
 class TextRequest(BaseModel):
