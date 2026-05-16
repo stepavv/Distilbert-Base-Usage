@@ -1,39 +1,49 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import onnxruntime as ort
-import numpy as np
 from transformers import AutoTokenizer
+import numpy as np
+from typing import List, Dict, Any
 
-app = FastAPI()
+app = FastAPI(title="Shield-82M PII Protection API")
 
-# Путь к ONNX-модели
-MODEL_PATH = "onnx/model.onnx"
+model = None
+tokenizer = None
+id2label = None
 
-# Загружаем токенизатор (оригинальный из Hugging Face)
-tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+@app.on_event("startup")
+def load_model():
+    global model, tokenizer, id2label
+    model_path = "onnx-community/Shield-82M-ONNX"
+    print(f"Загрузка модели {model_path}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    session = ort.InferenceSession(model_path)
+    # ... (получение id2label из модели)
+    print("Модель загружена.")
 
-# Загружаем ONNX Runtime сессию
-session = ort.InferenceSession(MODEL_PATH)
-
-class TextInput(BaseModel):
+class TextRequest(BaseModel):
     text: str
 
-@app.post("/predict")
-def predict(input: TextInput):
-    # Токенизация
-    tokens = tokenizer(input.text, return_tensors="np", padding=True, truncation=True)
-    # ONNX Runtime ожидает numpy arrays
-    inputs = {
-        "input_ids": tokens["input_ids"].astype(np.int64),
-        "attention_mask": tokens["attention_mask"].astype(np.int64),
-    }
-    outputs = session.run(["logits"], inputs)
-    logits = outputs[0]
-    # Softmax для получения вероятностей
-    probs = np.exp(logits) / np.sum(np.exp(logits), axis=-1, keepdims=True)
-    label = "POSITIVE" if np.argmax(probs) == 1 else "NEGATIVE"
-    return {"label": label, "confidence": float(np.max(probs))}
+@app.post("/redact", response_model=Dict[str, Any])
+async def redact_pii(request: TextRequest):
+    if not request.text:
+        raise HTTPException(status_code=400, detail="Текст не может быть пустым.")
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+    inputs = tokenizer(request.text, return_tensors="np", truncation=True, padding=True)
+
+    outputs = session.run(["logits"], {"input_ids": inputs["input_ids"], "attention_mask": inputs["attention_mask"]})
+    logits = outputs[0]
+
+    predictions = np.argmax(logits, axis=-1)[0]
+
+    entities = []
+    for token, pred_idx in zip(inputs["input_ids"][0], predictions):
+        label = id2label[pred_idx]
+        if label != "O":  # "O" означает "Outside", т.е. не ПД
+            token_str = tokenizer.decode([token])
+            entities.append({"token": token_str, "label": label})
+    
+    masked_text = request.text
+    for entity in entities:
+        masked_text = masked_text.replace(entity['token'], f"[{entity['label']}]")
+    return {"original_text": request.text, "masked_text": masked_text, "entities": entities}
