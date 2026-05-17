@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from transformers import AutoTokenizer, AutoConfig
 import onnxruntime as ort
 import numpy as np
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
 from huggingface_hub import snapshot_download
 from pathlib import Path
 
@@ -55,15 +55,15 @@ def load_model():
     print("\nLabels loaded:")
     print(id2label)
 
-    # Configure ONNX Runtime session options for optimization
+    
     session_options = ort.SessionOptions()
     session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     session_options.intra_op_num_threads = os.cpu_count() or 1
-    # Save optimized model to cache to speed up subsequent loads
+    
     optimized_path = Path(model_dir) / "optimized_model.onnx"
     session_options.optimized_model_filepath = str(optimized_path)
 
-    # Select providers (prefer CUDA if available)
+    
     available_providers = ort.get_available_providers()
     providers = []
     if "CUDAExecutionProvider" in available_providers:
@@ -92,11 +92,41 @@ def load_model():
 
 
 class TextRequest(BaseModel):
-    text: str
+    text: str = Field(..., description="Text to redact for PII", example="My email is john@example.com and my phone is 555-1234")
 
 
-@app.post("/redact")
+class Entity(BaseModel):
+    text: str = Field(..., description="The detected PII text")
+    label: str = Field(..., description="Type of PII (e.g., EMAIL, PHONE, CREDIT_CARD)")
+    start: int = Field(..., description="Start character position in original text")
+    end: int = Field(..., description="End character position in original text")
+
+
+class RedactionResponse(BaseModel):
+    original_text: str = Field(..., description="Original input text unchanged")
+    masked_text: str = Field(..., description="Text with PII replaced by [LABEL] tags")
+    entities: List[Entity] = Field(..., description="List of detected PII entities")
+
+
+class HealthResponse(BaseModel):
+    status: str = Field(..., description="Service status")
+    model_loaded: bool = Field(..., description="Whether the ONNX model is loaded")
+
+
+@app.post("/redact", response_model=RedactionResponse, summary="Redact PII from text", tags=["Redaction"])
 def redact_pii(request: TextRequest):
+    """
+    Detects and redacts Personally Identifiable Information (PII) from input text.
+    
+    Uses the Shield-82M ONNX model to identify PII entities such as:
+    - Email addresses
+    - Phone numbers
+    - Credit card numbers
+    - Social security numbers
+    - Names and addresses
+    
+    Returns the original text, masked text with [ENTITY_TYPE] tags, and a list of detected entities.
+    """
 
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Empty text")
@@ -198,16 +228,29 @@ def redact_pii(request: TextRequest):
             masked[ent["end"]:]
         )
 
-    return {
-        "original_text": request.text,
-        "masked_text": masked,
-        "entities": entities
-    }
+    return RedactionResponse(
+        original_text=request.text,
+        masked_text=masked,
+        entities=[
+            Entity(
+                text=ent["text"],
+                label=ent["label"],
+                start=ent["start"],
+                end=ent["end"]
+            )
+            for ent in entities
+        ]
+    )
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse, summary="Health check", tags=["Health"])
 def health():
-    return {
-        "status": "ok",
-        "model_loaded": session is not None
-    }
+    """
+    Returns the health status of the API and whether the model is loaded.
+    
+    Use this endpoint to verify the service is running and ready to accept requests.
+    """
+    return HealthResponse(
+        status="ok",
+        model_loaded=session is not None
+    )
