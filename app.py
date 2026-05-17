@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoConfig
 import onnxruntime as ort
 import numpy as np
+import os
 from typing import Dict, Any
 from huggingface_hub import snapshot_download
 from pathlib import Path
@@ -22,12 +23,10 @@ def load_model():
 
     print(f"Loading model: {model_id}")
 
-    # HF cache (без local_files_only — важно!)
     model_dir = snapshot_download(repo_id=model_id)
 
     print(f"Model cached at: {model_dir}")
 
-    # ONNX file selection (строго model.onnx если есть)
     onnx_files = list(Path(model_dir).rglob("*.onnx"))
 
     if not onnx_files:
@@ -37,7 +36,6 @@ def load_model():
     for f in onnx_files:
         print(f)
 
-    # выбираем model.onnx приоритетно
     onnx_path = None
     for f in onnx_files:
         if f.name == "model.onnx":
@@ -49,7 +47,6 @@ def load_model():
 
     print(f"\nUsing ONNX: {onnx_path}")
 
-    # tokenizer + config
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     config = AutoConfig.from_pretrained(model_dir)
 
@@ -58,10 +55,29 @@ def load_model():
     print("\nLabels loaded:")
     print(id2label)
 
-    # ONNX session
+    # Configure ONNX Runtime session options for optimization
+    session_options = ort.SessionOptions()
+    session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    session_options.intra_op_num_threads = os.cpu_count() or 1
+    # Save optimized model to cache to speed up subsequent loads
+    optimized_path = Path(model_dir) / "optimized_model.onnx"
+    session_options.optimized_model_filepath = str(optimized_path)
+
+    # Select providers (prefer CUDA if available)
+    available_providers = ort.get_available_providers()
+    providers = []
+    if "CUDAExecutionProvider" in available_providers:
+        providers.append("CUDAExecutionProvider")
+    providers.append("CPUExecutionProvider")
+
+    print(f"\nAvailable ONNX Runtime providers: {available_providers}")
+    print(f"Using providers: {providers}")
+    print(f"Optimized model path: {session_options.optimized_model_filepath}")
+
     session = ort.InferenceSession(
         onnx_path,
-        providers=["CPUExecutionProvider"]
+        sess_options=session_options,
+        providers=providers
     )
 
     print("\nModel inputs:")
@@ -115,7 +131,6 @@ def redact_pii(request: TextRequest):
     logits = outputs[0]
     predictions = np.argmax(logits, axis=-1)[0]
 
-    # ===== ENTITY EXTRACTION (FIXED) =====
     entities = []
 
     current_label = None
@@ -130,7 +145,6 @@ def redact_pii(request: TextRequest):
         if s == e:
             continue
 
-        # no entity
         if label == "O":
 
             if current_label is not None:
@@ -147,17 +161,14 @@ def redact_pii(request: TextRequest):
 
             continue
 
-        # start new entity
         if current_label is None:
             current_label = label
             start = int(s)
             end = int(e)
 
-        # same entity continues
         elif label == current_label:
             end = int(e)
 
-        # entity changed
         else:
             entities.append({
                 "text": request.text[start:end],
@@ -170,7 +181,6 @@ def redact_pii(request: TextRequest):
             start = int(s)
             end = int(e)
 
-    # flush last
     if current_label is not None:
         entities.append({
             "text": request.text[start:end],
@@ -179,7 +189,6 @@ def redact_pii(request: TextRequest):
             "end": end
         })
 
-    # ===== MASK TEXT =====
     masked = request.text
 
     for ent in sorted(entities, key=lambda x: x["start"], reverse=True):
