@@ -1,31 +1,38 @@
 name: Build and Push Docker Image
 
+# Trigger this workflow when code is pushed to the main branch.
 on:
   push:
     branches: [ main ]
 
+# Set the Docker image name and tag to use during the build.
 env:
   IMAGE: stepav/shield-pii
   TAG: latest
 
 jobs:
   build:
+    # Run this job on the latest Ubuntu GitHub Actions runner.
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
+        # Check out the repository for the build context.
         uses: actions/checkout@v4
 
       - name: Set up Buildx
+        # Prepare Docker Buildx for building multi-platform images and caching.
         uses: docker/setup-buildx-action@v3
 
       - name: Login Docker Hub
+        # Log in to Docker Hub with stored secrets.
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build & Push
+        # Build the Docker image and push it to the configured registry.
         uses: docker/build-push-action@v5
         with:
           context: .
